@@ -1,0 +1,77 @@
+podTemplate(cloud: 'gcp', inheritFrom: 'dev', yamlMergeStrategy: merge(),
+containers: [
+containerTemplate(name: 'maven', image: 'maven:3.9.0-amazoncorretto-11', ttyEnabled: true, command: 'cat'),
+containerTemplate(name: 'docker', image: 'google/cloud-sdk', ttyEnabled: true, command: 'cat'),
+containerTemplate(name: 'gcloud', image: 'gcr.io/cloud-builders/gcloud', ttyEnabled: true, command: 'cat'),
+],
+volumes: [hostPathVolume(hostPath: '/var/run/docker.sock', mountPath: '/var/run/docker.sock')]
+) {
+  node(POD_LABEL) {
+    stage("checkout") {
+      container('jnlp') {
+        checkout scm
+      }
+    }
+
+    stage('Build') {
+      container('maven'){
+        sh """
+          yum -y update
+          yum -y install git
+        """
+
+        configFileProvider([configFile(fileId: 'maven-settings', variable: 'MAVEN_SETTINGS')]) {
+          if (env.BRANCH_NAME == "master"){
+            sh """
+              mvn --version
+              mvn -s ${MAVEN_SETTINGS} clean deploy
+              ls -l target
+            """
+          }
+          if (env.BRANCH_NAME =~ "feature/"){
+            sh """
+              mvn --version
+              mvn clean test
+              ls -l target
+            """
+          }
+        }
+      }
+    }
+
+    stage('DockerImageBuild') {
+      container('docker'){
+        def harbor_url = "harbor.registry.dev"
+        withCredentials([usernamePassword(credentialsId: "harbor", usernameVariable: 'registryUser', passwordVariable: 'registryPassword')]) {
+        sh """
+          cd service
+          docker --version
+          docker login ${harbor_url} -u '${registryUser}' -p '${registryPassword}'
+          docker build --build-arg JAR_FILE=target/*.jar -t harbor.registry.dev/mohan/app:latest .
+          docker images
+          docker push harbor.registry.dev/mohan/app:latest
+        """
+        }
+      }
+    }
+
+  stage('DeployImage') {
+    container('gcloud'){
+      sh """
+        # get credentials
+        gcloud container clusters get-credentials --internal-ip mohan-gcp-cluster-dev --region us-central1 --project mohan-gcp-project-dev 
+        #gcloud auth
+        gcloud auth list
+        # show current context
+        kubectl config current-context
+        # kubectl config view
+        kubectl config view
+        #kubectl cluster-info
+        kubectl cluster-info
+        # run the deployment
+        kubectl apply -f deployment.yaml
+        """
+    }
+  }
+ }
+}
