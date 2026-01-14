@@ -1,0 +1,218 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                metadata:
+                  labels:
+                    jenkins: agent
+                spec:
+                  serviceAccountName: jenkins
+                  containers:
+                  - name: docker
+                    image: docker:latest
+                    command:
+                    - cat
+                    tty: true
+                    volumeMounts:
+                    - name: docker-sock
+                      mountPath: /var/run/docker.sock
+                  - name: kubectl
+                    image: google/cloud-sdk:alpine
+                    command:
+                    - cat
+                    tty: true
+                  - name: helm
+                    image: alpine/helm:latest
+                    command:
+                    - cat
+                    tty: true
+                  volumes:
+                  - name: docker-sock
+                    hostPath:
+                      path: /var/run/docker.sock
+            '''
+        }
+    }
+
+    environment {
+        // GCP Configuration
+        GCP_PROJECT_ID = credentials('gcp-project-id')
+        GCP_ZONE = 'us-central1-a'
+        GKE_CLUSTER_NAME = 'my-gke-cluster'
+        
+        // Docker Registry
+        DOCKER_REGISTRY = 'gcr.io'
+        IMAGE_NAME = "${DOCKER_REGISTRY}/${GCP_PROJECT_ID}/springboot-app"
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        
+        // Application
+        APP_NAME = 'springboot-app'
+        NAMESPACE = 'default'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out source code..."
+                    checkout scm
+                }
+            }
+        }
+
+        stage('Build Spring Boot Application') {
+            steps {
+                script {
+                    echo "Building Spring Boot application..."
+                    sh '''
+                        if [ -f "mvnw" ]; then
+                            ./mvnw clean package -DskipTests
+                        else
+                            mvn clean package -DskipTests
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                script {
+                    echo "Running unit tests..."
+                    sh '''
+                        if [ -f "mvnw" ]; then
+                            ./mvnw test
+                        else
+                            mvn test
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                container('docker') {
+                    script {
+                        echo "Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+                        sh '''
+                            docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f ./helm/docker/Dockerfile .
+                            docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Push Image to GCR') {
+            steps {
+                container('docker') {
+                    script {
+                        echo "Pushing Docker image to Google Container Registry..."
+                        sh '''
+                            # Authenticate with GCR
+                            gcloud auth configure-docker
+                            
+                            # Push image
+                            docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                            docker push ${IMAGE_NAME}:latest
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Create/Update Helm Chart') {
+            steps {
+                container('helm') {
+                    script {
+                        echo "Creating Helm chart..."
+                        sh '''
+                            # Validate Helm chart
+                            helm lint ./helm/charts/springboot-app
+                            
+                            # Dry run to validate
+                            helm template ${APP_NAME} ./helm/charts/springboot-app \
+                              --set image.repository=${IMAGE_NAME} \
+                              --set image.tag=${IMAGE_TAG} \
+                              --namespace ${NAMESPACE}
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Configure GKE Access') {
+            steps {
+                container('kubectl') {
+                    script {
+                        echo "Configuring GKE cluster access..."
+                        sh '''
+                            gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} \
+                              --zone ${GCP_ZONE} \
+                              --project ${GCP_PROJECT_ID}
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to GKE') {
+            steps {
+                container('helm') {
+                    script {
+                        echo "Deploying to GKE using Helm..."
+                        sh '''
+                            helm upgrade --install ${APP_NAME} ./helm/charts/springboot-app \
+                              --namespace ${NAMESPACE} \
+                              --set image.repository=${IMAGE_NAME} \
+                              --set image.tag=${IMAGE_TAG} \
+                              --set app.name=${APP_NAME} \
+                              --wait \
+                              --timeout 5m
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                container('kubectl') {
+                    script {
+                        echo "Verifying deployment status..."
+                        sh '''
+                            kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE}
+                            
+                            echo "Deployment details:"
+                            kubectl get pods -n ${NAMESPACE} -l app=${APP_NAME}
+                            
+                            echo "Service details:"
+                            kubectl get svc ${APP_NAME} -n ${NAMESPACE}
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline execution completed'
+        }
+        success {
+            echo "✓ Pipeline completed successfully"
+            echo "Application deployed: ${APP_NAME}"
+            echo "Image: ${IMAGE_NAME}:${IMAGE_TAG}"
+        }
+        failure {
+            echo "✗ Pipeline failed"
+            sh '''
+                echo "Rollback previous version if needed:"
+                helm rollback ${APP_NAME} -n ${NAMESPACE}
+            '''
+        }
+    }
+}

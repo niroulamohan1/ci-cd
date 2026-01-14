@@ -1,0 +1,69 @@
+name: Build and deploy to GKE with Helm from main branch
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy with Helm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build with Maven
+        run: mvn clean package
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker to use GCP registry
+        run: gcloud auth configure-docker
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t ${{ secrets.DOCKER_IMAGE }} .
+          docker push ${{ secrets.DOCKER_IMAGE }}
+
+      - name: Authenticate kubectl
+        run: |
+          gcloud container clusters get-credentials ${{ secrets.GKE_CLUSTER_NAME }} \
+            --region ${{ secrets.GCP_REGION }} \
+            --project ${{ secrets.GCP_PROJECT_ID }}
+ 
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      - name: Add Helm repository
+        run: |
+          helm repo add myrepo ${{ secrets.HELM_REPO_URL }}
+          helm repo update
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install ${{ secrets.HELM_RELEASE_NAME }} myrepo/${{ secrets.HELM_CHART_NAME }} \
+            --namespace ${{ secrets.K8S_NAMESPACE }} \
+            --create-namespace \
+            --values helm/values.yaml \
+            --set image.repository=${{ secrets.DOCKER_IMAGE }} \
+            --set image.tag=${{ github.sha }} \
+            --wait
+
+      - name: Verify Helm deployment
+        run: |
+          helm list --namespace ${{ secrets.K8S_NAMESPACE }}
+          kubectl get deployments -n ${{ secrets.K8S_NAMESPACE }}

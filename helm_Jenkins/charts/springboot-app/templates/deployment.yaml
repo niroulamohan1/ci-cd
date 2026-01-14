@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-{{ .Chart.Name }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app: {{ .Values.app.name }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app: {{ .Values.app.name }}
+  template:
+    metadata:
+      {{- if .Values.podAnnotations }}
+      annotations:
+        prometheus.io/scrape: "{{ .Values.podAnnotations.prometheus.io/scrape | default "true" }}"
+        prometheus.io/port: "{{ .Values.podAnnotations.prometheus.io/port | default "8080" }}"
+        prometheus.io/path: "{{ .Values.podAnnotations.prometheus.io/path | default "/actuator/prometheus" }}"
+      {{- end }}
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app: {{ .Values.app.name }}
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      securityContext:
+        runAsNonRoot: {{ .Values.podSecurityContext.runAsNonRoot | default true }}
+        runAsUser: {{ .Values.podSecurityContext.runAsUser | default 1000 }}
+        fsGroup: {{ .Values.podSecurityContext.fsGroup | default 1000 }}
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        securityContext:
+          allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation | default false }}
+          readOnlyRootFilesystem: {{ .Values.securityContext.readOnlyRootFilesystem | default true }}
+          capabilities:
+            drop:
+              - ALL
+        ports:
+        - name: http
+          containerPort: {{ .Values.service.targetPort | default 8080 }}
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.livenessProbe.httpGet.path | default "/actuator/health" }}
+            port: http
+          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds | default 40 }}
+          periodSeconds: {{ .Values.livenessProbe.periodSeconds | default 10 }}
+          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds | default 5 }}
+          failureThreshold: {{ .Values.livenessProbe.failureThreshold | default 3 }}
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.readinessProbe.httpGet.path | default "/actuator/health" }}
+            port: http
+          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds | default 20 }}
+          periodSeconds: {{ .Values.readinessProbe.periodSeconds | default 5 }}
+          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds | default 3 }}
+          failureThreshold: {{ .Values.readinessProbe.failureThreshold | default 3 }}
+        resources:
+          limits:
+            cpu: {{ .Values.resources.limits.cpu | default "500m" }}
+            memory: {{ .Values.resources.limits.memory | default "512Mi" }}
+          requests:
+            cpu: {{ .Values.resources.requests.cpu | default "250m" }}
+            memory: {{ .Values.resources.requests.memory | default "256Mi" }}
+        {{- if .Values.env }}
+        env:
+          {{- range .Values.env }}
+          - name: {{ .name }}
+            value: "{{ .value }}"
+          {{- end }}
+        {{- end }}
+        {{- if .Values.volumeMounts }}
+        volumeMounts:
+          {{- range .Values.volumeMounts }}
+          - name: {{ .name }}
+            mountPath: {{ .mountPath }}
+          {{- end }}
+        {{- end }}
+      {{- if .Values.nodeSelector }}
+      nodeSelector:
+        {{- range $key, $val := .Values.nodeSelector }}
+        {{ $key }}: {{ $val }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                  - {{ .Chart.Name }}
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- if .Values.tolerations }}
+      tolerations:
+        {{- range .Values.tolerations }}
+        - key: {{ .key }}
+          operator: {{ .operator }}
+          value: {{ .value }}
+          effect: {{ .effect }}
+        {{- end }}
+      {{- end }}
+      {{- if .Values.volumes }}
+      volumes:
+        {{- range .Values.volumes }}
+        - name: {{ .name }}
+          {{- if .emptyDir }}
+          emptyDir: {}
+          {{- end }}
+          {{- if .configMap }}
+          configMap:
+            name: {{ .configMap.name }}
+          {{- end }}
+          {{- if .secret }}
+          secret:
+            secretName: {{ .secret.secretName }}
+          {{- end }}
+        {{- end }}
+      {{- end }}

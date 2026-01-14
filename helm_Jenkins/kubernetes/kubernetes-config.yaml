@@ -1,0 +1,30 @@
+# Example pom.xml for Spring Boot Application
+# This is a reference - update with your actual dependencies
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: springboot-app-config
+  namespace: default
+data:
+  application.properties: |
+    server.port=8080
+    server.servlet.context-path=/
+    
+    # Spring Boot Actuator
+    management.endpoints.web.exposure.include=health,metrics,prometheus
+    management.endpoint.health.show-details=always
+    
+    # Logging
+    logging.level.root=INFO
+    logging.level.com.example=DEBUG
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: springboot-app-config-env
+  namespace: default
+data:
+  ENVIRONMENT: production
+  LOG_LEVEL: INFO
